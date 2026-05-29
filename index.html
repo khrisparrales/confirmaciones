@@ -23,6 +23,15 @@
             background-color: white;
             cursor: move;
             transition: box-shadow 0.3s ease;
+            max-width: 100%;
+            width: fit-content;
+            height: auto;
+        }
+
+        #pdf-canvas {
+            max-width: 100%;
+            height: auto;
+            display: block;
         }
 
         #overlay-img {
@@ -300,14 +309,14 @@
         const inputCoordY = document.getElementById('input-coord-y');
         const suggestionBtn = document.getElementById('suggestion-btn');
 
-        // Estado interno de la aplicación
+        // Estado interno de la aplicación (Todas las posiciones se guardan en escala virtual 1:1 de alta resolución)
         let pdfDoc = null;
         let currentPageNum = 1;
         let isDragging = false;
-        let xOffset = 180; // Posicion inicial sugerida por defecto
-        let yOffset = 1000; // Posicion inicial sugerida por defecto (zona inferior)
+        let xOffset = 180; // Posición virtual real X en píxeles de impresión
+        let yOffset = 1000; // Posición virtual real Y en píxeles de impresión
         let initialX, initialY;
-        let scaleFactor = 100; // Porcentaje de escala
+        let scaleFactor = 100; // Porcentaje de escala del comprobante
 
         // Sistema personalizado de notificaciones (Toasts)
         function showNotification(title, message, type = 'success') {
@@ -344,22 +353,26 @@
             }, 4000);
         }
 
-        // Función para actualizar el panel de coordenadas en la interfaz
+        // Función para actualizar el panel de coordenadas en la interfaz con los valores virtuales reales
         function updateCoordinatesUI() {
             inputCoordX.value = Math.round(xOffset);
             inputCoordY.value = Math.round(yOffset);
         }
 
-        // Aplicar coordenadas manuales de forma segura
+        // Mapea y actualiza la posición física de la imagen en pantalla aplicando la proporción de escala actual
+        function updateImgPositionOnScreen() {
+            if (!overlayImg.src || !pdfCanvas.width || !pdfCanvas.offsetWidth) return;
+            // Proporción de conversión (Píxeles de visualización / Píxeles reales)
+            const ratio = pdfCanvas.offsetWidth / pdfCanvas.width;
+            overlayImg.style.left = (xOffset * ratio) + "px";
+            overlayImg.style.top = (yOffset * ratio) + "px";
+        }
+
+        // Aplicar coordenadas manuales virtuales de forma segura y recalcular pantalla
         function applyManualCoordinates(x, y) {
             xOffset = x;
             yOffset = y;
-            
-            // Si el documento ya está cargado, reposicionamos la imagen
-            if (overlayImg.src && !overlayImg.classList.contains('hidden')) {
-                overlayImg.style.left = xOffset + "px";
-                overlayImg.style.top = yOffset + "px";
-            }
+            updateImgPositionOnScreen();
             updateCoordinatesUI();
         }
 
@@ -378,15 +391,15 @@
         suggestionBtn.addEventListener('click', () => {
             applyManualCoordinates(775, 3661);
             
-            // Si el PDF cargado actualmente es más pequeño, dar un aviso sutil
-            if (pdfCanvas.width && (pdfCanvas.width < 775 || pdfCanvas.height < 3661)) {
+            // Si el PDF cargado actualmente es más pequeño en altura, dar un aviso informativo de todos modos
+            if (pdfCanvas.height && pdfCanvas.height < 3661) {
                 showNotification(
                     "Sugerencia fijada", 
-                    `Posición ajustada a (775x, 3661y). Nota: Excede los límites de la página actual (${pdfCanvas.width}x${pdfCanvas.height}px).`, 
+                    `Posición ajustada a (775x, 3661y). Nota: Excede la altura del PDF actual (${pdfCanvas.height}px).`, 
                     "info"
                 );
             } else {
-                showNotification("Ubicación Sugerida", "Se han aplicado las coordenadas 775px (X) y 3661px (Y).");
+                showNotification("Ubicación Sugerida", "Se han aplicado las coordenadas recomendadas 775px (X) y 3661px (Y).");
             }
         });
 
@@ -428,7 +441,10 @@
                     viewport: viewport
                 };
                 await page.render(renderContext).promise;
+                
+                // Forzar el redibujado proporcional al nuevo lienzo renderizado
                 updateImgSize();
+                updateImgPositionOnScreen();
                 updateCoordinatesUI();
             } catch (error) {
                 console.error("Error al renderizar página del PDF: ", error);
@@ -485,11 +501,9 @@
                 overlayImg.src = event.target.result;
                 overlayImg.classList.remove('hidden');
                 
-                // Colocamos el nuevo archivo subido exactamente donde se encuentre xOffset/yOffset actualmente.
-                overlayImg.style.left = xOffset + "px";
-                overlayImg.style.top = yOffset + "px";
-
+                // Al cargar la imagen, se posiciona inmediatamente usando las coordenadas y offset activos
                 updateImgSize();
+                updateImgPositionOnScreen();
                 updateCoordinatesUI();
                 showNotification("Comprobante cargado", "La imagen se colocó en tu posición preestablecida.");
             };
@@ -500,20 +514,40 @@
         sizeRange.addEventListener('input', () => {
             scaleFactor = sizeRange.value;
             updateImgSize();
+            updateImgPositionOnScreen(); // Recalcular posición relativa tras cambio de tamaño
         });
 
+        // Calcula el tamaño físico en pantalla de la confirmación adaptado de forma responsiva
         function updateImgSize() {
-            if (!overlayImg.src || !pdfCanvas.width) return;
+            if (!overlayImg.src || !pdfCanvas.width || !pdfCanvas.offsetWidth) return;
             
             const scale = scaleFactor / 100;
             sizePercent.innerText = scaleFactor + "%";
             
-            // El ancho base por defecto de la confirmación es el 40% del documento
-            const baseWidth = pdfCanvas.width * 0.4;
-            overlayImg.style.width = (baseWidth * scale) + 'px';
+            // El ancho base virtual por defecto es el 40% del ancho del documento de alta resolución
+            const baseWidthReal = pdfCanvas.width * 0.4;
+            const actualImgWidthReal = baseWidthReal * scale;
+            
+            // Convertir píxeles reales a píxeles de pantalla mediante la proporción responsiva
+            const ratio = pdfCanvas.offsetWidth / pdfCanvas.width;
+            overlayImg.style.width = (actualImgWidthReal * ratio) + 'px';
         }
 
-        // Lógica de Movimiento sin SALTOS (Lee la posición física real al hacer clic)
+        // Asegura que las imágenes se actualicen inmediatamente tras cargarse en el DOM de forma asíncrona
+        overlayImg.onload = function() {
+            updateImgSize();
+            updateImgPositionOnScreen();
+        };
+
+        // Escucha cambios de tamaño de pantalla globales para mantener el renderizado responsivo sin desvíos
+        window.addEventListener('resize', () => {
+            if (pdfDoc) {
+                updateImgSize();
+                updateImgPositionOnScreen();
+            }
+        });
+
+        // Lógica de Movimiento libre de saltos (Interactúa en pantalla y calcula en alta resolución)
         function dragStart(e) {
             if (e.target !== overlayImg) return;
             
@@ -524,11 +558,11 @@
             
             if (clientX === undefined || clientY === undefined) return;
 
-            // Leer de manera dinámica la posición actual real (estilo CSS o posición offset física)
+            // Leer de manera dinámica la posición actual de pantalla en la que está dibujada la imagen
             const currentLeft = parseFloat(overlayImg.style.left) || overlayImg.offsetLeft || 0;
             const currentTop = parseFloat(overlayImg.style.top) || overlayImg.offsetTop || 0;
 
-            // Almacenar la distancia exacta entre el mouse y la esquina superior izquierda del comprobante
+            // Almacenar la distancia exacta del cursor con respecto a la esquina de la imagen en píxeles de pantalla
             initialX = clientX - currentLeft;
             initialY = clientY - currentTop;
         }
@@ -542,29 +576,32 @@
 
                 e.preventDefault();
                 
-                // Calcular nueva posición relativa al contenedor
+                // Calcular nueva posición en píxeles de pantalla
                 let newLeft = clientX - initialX;
                 let newTop = clientY - initialY;
                 
-                // Limitar el movimiento dentro de los márgenes del canvas del documento
-                const minX = -100; // Permitir arrastre ligeramente por fuera para mayor comodidad
+                // Limitar el movimiento relativo al tamaño actual de pantalla del lienzo
+                const minX = -100; // Margen exterior confortable
                 const minY = -100;
-                const maxX = pdfCanvas.width - (overlayImg.offsetWidth || 50) + 100;
-                const maxY = pdfCanvas.height - (overlayImg.offsetHeight || 50) + 100;
+                const maxX = pdfCanvas.offsetWidth - (overlayImg.offsetWidth || 50) + 100;
+                const maxY = pdfCanvas.offsetHeight - (overlayImg.offsetHeight || 50) + 100;
                 
                 // Aplicar límites inteligentes
                 newLeft = Math.max(minX, Math.min(newLeft, maxX));
                 newTop = Math.max(minY, Math.min(newTop, maxY));
 
-                // Aplicar estilos directos
+                // Aplicar estilos en píxeles de pantalla
                 overlayImg.style.left = newLeft + "px";
                 overlayImg.style.top = newTop + "px";
                 
-                // Mantener sincronizados los offsets globales para que se recuerden en la siguiente subida
-                xOffset = newLeft;
-                yOffset = newTop;
+                // Convertir la nueva posición de pantalla a coordenadas reales de alta resolución
+                if (pdfCanvas.offsetWidth && pdfCanvas.width) {
+                    const ratio = pdfCanvas.width / pdfCanvas.offsetWidth;
+                    xOffset = newLeft * ratio;
+                    yOffset = newTop * ratio;
+                }
                 
-                // Actualizar números en tiempo real en los inputs editables
+                // Actualizar números del sidebar en tiempo real
                 updateCoordinatesUI();
             }
         }
@@ -585,14 +622,11 @@
 
         // Restaurar posición inicial de la imagen
         resetBtn.addEventListener('click', () => {
-            xOffset = 30;
-            yOffset = 30;
-            overlayImg.style.left = "30px";
-            overlayImg.style.top = "30px";
+            applyManualCoordinates(30, 30);
             scaleFactor = 100;
             sizeRange.value = 100;
             updateImgSize();
-            updateCoordinatesUI();
+            updateImgPositionOnScreen();
             showNotification("Restablecido", "Ubicación inicial restablecida a la esquina (30, 30).");
         });
 
@@ -622,21 +656,20 @@
                 const exportCanvas = document.getElementById('export-canvas');
                 const ctx = exportCanvas.getContext('2d');
                 
-                // Redimensionar el canvas de alta definición
+                // Redimensionar el canvas de alta definición para que calce 1:1 con el PDF original
                 exportCanvas.width = pdfCanvas.width;
                 exportCanvas.height = pdfCanvas.height;
 
                 // Dibujar el documento de fondo
                 ctx.drawImage(pdfCanvas, 0, 0);
 
-                // Obtener parámetros de la confirmación flotante
-                const x = overlayImg.offsetLeft;
-                const y = overlayImg.offsetTop;
-                const w = overlayImg.offsetWidth;
-                const h = overlayImg.offsetHeight;
+                // Calcular dimensiones e interpolaciones en base a coordenadas virtuales fijas (Píxeles reales)
+                const baseWidth = pdfCanvas.width * 0.4;
+                const w = baseWidth * (scaleFactor / 100);
+                const h = (overlayImg.naturalHeight / overlayImg.naturalWidth) * w;
                 
-                // Dibujar el comprobante flotante sobre el canvas
-                ctx.drawImage(overlayImg, x, y, w, h);
+                // Dibujar el comprobante directamente usando coordenadas virtuales de impresión reales
+                ctx.drawImage(overlayImg, xOffset, yOffset, w, h);
 
                 // Convertir todo a imagen empaquetada de alta fidelidad
                 const imgData = exportCanvas.toDataURL('image/jpeg', 0.95);
